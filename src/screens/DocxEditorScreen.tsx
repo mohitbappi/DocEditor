@@ -3,15 +3,20 @@
  * Main screen for the DOCX Editor POC.
  *
  * Flow:
- *  1. Admin picks a .docx file via DocumentPicker
+ *  1. Admin picks a .docx file via @react-native-documents/picker
  *  2. Mammoth converts it to HTML preserving all formatting
  *  3. react-native-pell-rich-editor provides a full rich-text editor
  *     with Hindi + English keyboard support
- *  4. Admin taps Download → HTML file saved to Downloads
- *     (open in browser → Print → Save as PDF for perfect fidelity)
+ *  4. Admin taps Proceed → selects page size (A4 / Legal) → downloads PDF
+ *
+ * Changes from previous version:
+ *  - Page size selector added to the download step (A4 / Legal).
+ *  - generatePdf() now receives the chosen PageSize.
+ *  - <style> blocks are NO LONGER stripped before export — this was the
+ *    primary cause of formatting loss in the PDF.
  */
 
-import React, {useCallback, useRef, useState} from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -21,18 +26,26 @@ import {
   Alert,
   KeyboardAvoidingView,
   ScrollView,
-  StatusBar,
 } from 'react-native';
-import {RichEditor, RichToolbar, actions} from 'react-native-pell-rich-editor';
-import DocumentPicker, {
-  DocumentPickerResponse,
+import {
+  RichEditor,
+  RichToolbar,
+  actions,
+} from 'react-native-pell-rich-editor';
+
+import {
+  pick,
+  keepLocalCopy,
+  isErrorWithCode,
+  errorCodes,
   types,
-} from 'react-native-document-picker';
-import RNFS from 'react-native-fs';
-import {COLORS, STRINGS, MAX_FILE_SIZE_MB} from '../utils/constants';
-import {convertDocxToHtml, validateDocxFile} from '../utils/docxConverter';
-import {generatePdf} from '../utils/pdfGenerator';
-import {EditorState, Language} from '../types';
+} from '@react-native-documents/picker';
+import type { DocumentPickerResponse } from '@react-native-documents/picker';
+import { COLORS, STRINGS, MAX_FILE_SIZE_MB } from '../utils/constants';
+import { convertDocxToHtml, validateDocxFile } from '../utils/docxConverter';
+import { generatePdf, PAGE_SIZES } from '../utils/pdfGenerator';
+import type { PageSize } from '../utils/pdfGenerator';
+import { EditorState, Language } from '../types';
 import UploadSection from '../components/UploadSection';
 import StepIndicator from '../components/StepIndicator';
 import LanguageToggle from '../components/LanguageToggle';
@@ -55,64 +68,75 @@ const DocxEditorScreen: React.FC = () => {
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [editorHtml, setEditorHtml] = useState<string>('');
 
+  // ── Page size state — default A4, user can change in the download step ──
+  const [selectedPageSize, setSelectedPageSize] = useState<PageSize>('A4');
+
   const strings = STRINGS[state.activeLanguage];
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
 
   const setLoading = (msg: string) =>
-    setState(prev => ({...prev, isLoading: true, loadingMessage: msg, error: null}));
+    setState(prev => ({
+      ...prev,
+      isLoading: true,
+      loadingMessage: msg,
+      error: null,
+    }));
 
   const setError = (error: string) =>
-    setState(prev => ({...prev, isLoading: false, error}));
+    setState(prev => ({ ...prev, isLoading: false, error }));
 
-  const clearError = () => setState(prev => ({...prev, error: null}));
+  const clearError = () => setState(prev => ({ ...prev, error: null }));
 
   // ─── Step 1: Pick DOCX File ────────────────────────────────────────────────
 
   const handlePickFile = useCallback(async () => {
     clearError();
     try {
-      const result: DocumentPickerResponse[] = await DocumentPicker.pick({
-        type: [types.allFiles], // filter to .docx on the next step
+      const results: DocumentPickerResponse[] = await pick({
         allowMultiSelection: false,
-        copyTo: 'cachesDirectory', // copy to app cache for reliable path access
+        type: [types.allFiles],
       });
 
-      const file = result[0];
+      const file = results[0];
 
-      // Validate extension
       const name = file.name ?? '';
       if (!name.toLowerCase().endsWith('.docx')) {
         setError(strings.fileTypeError);
         return;
       }
 
-      // Validate file size
       const sizeMB = (file.size ?? 0) / (1024 * 1024);
       if (sizeMB > MAX_FILE_SIZE_MB) {
         setError(strings.fileSizeError);
         return;
       }
 
-      // Use copied path if available (more reliable on Android)
-      const filePath = file.fileCopyUri ?? file.uri;
+      setLoading(strings.convertingMsg);
 
-      // Validate it's actually a DOCX (magic bytes check)
-      const isValid = await validateDocxFile(
-        decodeURIComponent(filePath.replace('file://', '')),
+      const copyResults = await keepLocalCopy({
+        files: [{ uri: file.uri, fileName: name }],
+        destination: 'cachesDirectory',
+      });
+
+      const copyResult = copyResults[0];
+      if (copyResult.status === 'error') {
+        setError(copyResult.copyError ?? strings.errorMsg);
+        return;
+      }
+
+      const cleanPath = decodeURIComponent(
+        copyResult.localUri.replace('file://', ''),
       );
+
+      const isValid = await validateDocxFile(cleanPath);
       if (!isValid) {
         setError(strings.fileTypeError);
         return;
       }
 
-      setLoading(strings.convertingMsg);
-
-      // Convert DOCX → HTML
-      const cleanPath = decodeURIComponent(filePath.replace('file://', ''));
       const conversion = await convertDocxToHtml(cleanPath);
 
-      // Log any conversion warnings (non-blocking)
       if (conversion.messages.length > 0) {
         console.warn('Conversion messages:', conversion.messages);
       }
@@ -130,18 +154,14 @@ const DocxEditorScreen: React.FC = () => {
 
       setEditorHtml(conversion.html);
 
-      // Inject content into rich editor after a short delay for mount
       setTimeout(() => {
         richEditorRef.current?.setContentHTML(conversion.html);
       }, 300);
     } catch (err: unknown) {
-      if (DocumentPicker.isCancel(err)) {
-        // User cancelled — not an error
+      if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
         return;
       }
-      setError(
-        err instanceof Error ? err.message : strings.errorMsg,
-      );
+      setError(err instanceof Error ? err.message : strings.errorMsg);
     }
   }, [strings]);
 
@@ -152,18 +172,16 @@ const DocxEditorScreen: React.FC = () => {
   }, []);
 
   const handleProceedToDownload = useCallback(async () => {
-    // Get latest content from editor
     const currentHtml = await richEditorRef.current?.getContentHtml();
     if (currentHtml !== undefined) {
       setEditorHtml(currentHtml);
     }
-    setState(prev => ({...prev, step: 'download', error: null}));
+    setState(prev => ({ ...prev, step: 'download', error: null }));
   }, []);
 
   const handleEditAgain = useCallback(() => {
     setSavedPath(null);
-    setState(prev => ({...prev, step: 'edit', error: null}));
-    // Re-inject content
+    setState(prev => ({ ...prev, step: 'edit', error: null }));
     setTimeout(() => {
       richEditorRef.current?.setContentHTML(editorHtml);
     }, 300);
@@ -174,31 +192,39 @@ const DocxEditorScreen: React.FC = () => {
   const handleExport = useCallback(async () => {
     setLoading(strings.downloadingMsg);
     try {
-      const result = await generatePdf(editorHtml, state.fileName ?? 'document');
+      const result = await generatePdf(
+        editorHtml,
+        state.fileName ?? 'document',
+        selectedPageSize, // ← pass chosen page size
+      );
       if (result.success) {
         setSavedPath(result.path);
-        setState(prev => ({...prev, isLoading: false}));
+        setState(prev => ({ ...prev, isLoading: false }));
         Alert.alert(
           strings.successMsg,
-          `${result.method === 'html'
-            ? (state.activeLanguage === 'hi'
-                ? 'Downloads फ़ोल्डर में HTML फ़ाइल खोलें और PDF के लिए Print करें।'
-                : 'Open the HTML file in your Downloads folder and Print to save as PDF.')
-            : result.path}`,
+          result.method === 'html'
+            ? state.activeLanguage === 'hi'
+              ? 'Downloads फ़ोल्डर में HTML फ़ाइल खोलें और PDF के लिए Print करें।'
+              : 'Open the HTML file in your Downloads folder and Print to save as PDF.'
+            : result.path,
         );
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : strings.errorMsg);
     }
-  }, [editorHtml, state.fileName, state.activeLanguage, strings]);
+  }, [
+    editorHtml,
+    state.fileName,
+    state.activeLanguage,
+    strings,
+    selectedPageSize,
+  ]);
 
   // ─── Language toggle ───────────────────────────────────────────────────────
 
   const handleLanguageToggle = useCallback((lang: Language) => {
-    setState(prev => ({...prev, activeLanguage: lang}));
-    // Adjust editor keyboard for Hindi
+    setState(prev => ({ ...prev, activeLanguage: lang }));
     if (lang === 'hi') {
-      // Hint to the editor for Devanagari input
       richEditorRef.current?.focusContentEditor();
     }
   }, []);
@@ -232,8 +258,8 @@ const DocxEditorScreen: React.FC = () => {
       <KeyboardAvoidingView
         style={styles.content}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 0}>
-
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 0}
+      >
         {/* STEP 1: Upload */}
         {state.step === 'upload' && (
           <UploadSection
@@ -275,7 +301,6 @@ const DocxEditorScreen: React.FC = () => {
                 actions.indent,
                 actions.outdent,
                 actions.blockquote,
-                actions.insertHorizontalRule,
                 actions.removeFormat,
               ]}
               iconMap={{
@@ -309,8 +334,11 @@ const DocxEditorScreen: React.FC = () => {
               </Text>
               {state.fileName ? (
                 <TouchableOpacity
-                  onPress={() => setState(prev => ({...prev, step: 'upload', error: null}))}
-                  style={styles.changeFileBtn}>
+                  onPress={() =>
+                    setState(prev => ({ ...prev, step: 'upload', error: null }))
+                  }
+                  style={styles.changeFileBtn}
+                >
                   <Text style={styles.changeFileBtnText}>
                     {strings.changeFile}
                   </Text>
@@ -326,11 +354,9 @@ const DocxEditorScreen: React.FC = () => {
                 initialContentHTML={state.htmlContent}
                 onChange={handleEditorChange}
                 placeholder={strings.editPlaceholder}
-                androidHardwareAccelerationDisabled={false}
                 useContainer={true}
                 autoCapitalize="sentences"
                 autoCorrect
-                spellCheck
                 initialHeight={500}
                 editorStyle={{
                   backgroundColor: COLORS.surface,
@@ -373,7 +399,8 @@ const DocxEditorScreen: React.FC = () => {
                 style={styles.proceedButton}
                 onPress={handleProceedToDownload}
                 activeOpacity={0.85}
-                accessibilityRole="button">
+                accessibilityRole="button"
+              >
                 <Text style={styles.proceedButtonText}>
                   {state.activeLanguage === 'hi' ? 'आगे बढ़ें →' : 'Proceed →'}
                 </Text>
@@ -384,17 +411,85 @@ const DocxEditorScreen: React.FC = () => {
 
         {/* STEP 3: Export/Download */}
         {state.step === 'download' && (
-          <ExportSection
-            fileName={state.fileName ?? 'document.docx'}
-            htmlContent={editorHtml}
-            isLoading={state.isLoading}
-            loadingMessage={state.loadingMessage}
-            language={state.activeLanguage}
-            savedPath={savedPath}
-            error={state.error}
-            onExport={handleExport}
-            onEditAgain={handleEditAgain}
-          />
+          <ScrollView
+            style={styles.downloadScroll}
+            contentContainerStyle={styles.downloadScrollContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* ── Page Size Selector ─────────────────────────────────────── */}
+            <View style={styles.pageSizeCard}>
+              <Text style={styles.pageSizeTitle}>
+                {state.activeLanguage === 'hi'
+                  ? '📄 पेज का आकार चुनें'
+                  : '📄 Select Page Size'}
+              </Text>
+              <Text style={styles.pageSizeSubtitle}>
+                {state.activeLanguage === 'hi'
+                  ? 'PDF किस आकार में सहेजें?'
+                  : 'Choose the paper size for the exported PDF'}
+              </Text>
+
+              <View style={styles.pageSizeOptions}>
+                {(Object.keys(PAGE_SIZES) as PageSize[]).map(size => {
+                  const isSelected = selectedPageSize === size;
+                  return (
+                    <TouchableOpacity
+                      key={size}
+                      style={[
+                        styles.pageSizeOption,
+                        isSelected && styles.pageSizeOptionSelected,
+                      ]}
+                      onPress={() => setSelectedPageSize(size)}
+                      activeOpacity={0.8}
+                      accessibilityRole="radio"
+                      accessibilityState={{ selected: isSelected }}
+                    >
+                      {/* Radio dot */}
+                      <View style={styles.radioOuter}>
+                        {isSelected && <View style={styles.radioInner} />}
+                      </View>
+
+                      <View style={styles.pageSizeOptionText}>
+                        <Text
+                          style={[
+                            styles.pageSizeOptionName,
+                            isSelected && styles.pageSizeOptionNameSelected,
+                          ]}
+                        >
+                          {size}
+                        </Text>
+                        <Text style={styles.pageSizeOptionDimension}>
+                          {PAGE_SIZES[size].label}
+                        </Text>
+                      </View>
+
+                      {/* Miniature page icon */}
+                      <View
+                        style={[
+                          styles.pageMiniature,
+                          size === 'Legal' && styles.pageMiniatureLegal,
+                          isSelected && styles.pageMiniatureSelected,
+                        ]}
+                      />
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+
+            {/* ── ExportSection (existing component) ────────────────────── */}
+            <ExportSection
+              fileName={state.fileName ?? 'document.docx'}
+              htmlContent={editorHtml}
+              isLoading={state.isLoading}
+              loadingMessage={state.loadingMessage}
+              language={state.activeLanguage}
+              savedPath={savedPath}
+              error={state.error}
+              onExport={handleExport}
+              onEditAgain={handleEditAgain}
+            />
+          </ScrollView>
         )}
       </KeyboardAvoidingView>
     </View>
@@ -418,7 +513,7 @@ const styles = StyleSheet.create({
     paddingTop: Platform.OS === 'android' ? 12 : 8,
     elevation: 6,
     shadowColor: '#000',
-    shadowOffset: {width: 0, height: 3},
+    shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.25,
     shadowRadius: 6,
   },
@@ -440,6 +535,8 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
   },
+
+  // ── Editor step ────────────────────────────────────────────────────────
   editorContainer: {
     flex: 1,
     backgroundColor: COLORS.surface,
@@ -499,7 +596,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     elevation: 8,
     shadowColor: '#000',
-    shadowOffset: {width: 0, height: -2},
+    shadowOffset: { width: 0, height: -2 },
     shadowOpacity: 0.08,
     shadowRadius: 4,
   },
@@ -519,7 +616,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     elevation: 3,
     shadowColor: COLORS.accent,
-    shadowOffset: {width: 0, height: 2},
+    shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,
     shadowRadius: 4,
   },
@@ -527,6 +624,111 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 15,
     fontWeight: 'bold',
+  },
+
+  // ── Download step ──────────────────────────────────────────────────────
+  downloadScroll: {
+    flex: 1,
+  },
+  downloadScrollContent: {
+    paddingBottom: 32,
+  },
+
+  // ── Page size card ─────────────────────────────────────────────────────
+  pageSizeCard: {
+    margin: 16,
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 20,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    borderWidth: 1,
+    borderColor: COLORS.borderLight,
+  },
+  pageSizeTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginBottom: 4,
+  },
+  pageSizeSubtitle: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginBottom: 16,
+    lineHeight: 17,
+  },
+  pageSizeOptions: {
+    gap: 10,
+  },
+  pageSizeOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: COLORS.borderLight,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: COLORS.background,
+  },
+  pageSizeOptionSelected: {
+    borderColor: COLORS.primary,
+    backgroundColor: '#EEF1FF',
+  },
+
+  // Radio button
+  radioOuter: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  radioInner: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: COLORS.primary,
+  },
+
+  pageSizeOptionText: {
+    flex: 1,
+  },
+  pageSizeOptionName: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  pageSizeOptionNameSelected: {
+    color: COLORS.primary,
+  },
+  pageSizeOptionDimension: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    marginTop: 2,
+  },
+
+  // Miniature page shape icon
+  pageMiniature: {
+    width: 22,
+    height: 28, // A4 aspect ~1:√2
+    borderRadius: 2,
+    borderWidth: 1.5,
+    borderColor: COLORS.borderLight,
+    backgroundColor: '#fff',
+    marginLeft: 12,
+  },
+  pageMiniatureLegal: {
+    height: 36, // Legal is taller
+  },
+  pageMiniatureSelected: {
+    borderColor: COLORS.primary,
+    backgroundColor: '#C5CAE9',
   },
 });
 

@@ -7,10 +7,9 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
-  Animated,
 } from 'react-native';
-import {COLORS, STRINGS} from '../utils/constants';
-import {Language} from '../types';
+import { COLORS, STRINGS } from '../utils/constants';
+import { Language } from '../types';
 
 interface UploadSectionProps {
   onPickFile: () => void;
@@ -85,7 +84,8 @@ const UploadSection: React.FC<UploadSectionProps> = ({
           onPress={onPickFile}
           activeOpacity={0.8}
           accessibilityLabel={strings.uploadBtn}
-          accessibilityRole="button">
+          accessibilityRole="button"
+        >
           <Text style={styles.uploadIcon}>📂</Text>
           <Text style={styles.uploadButtonText}>{strings.uploadBtn}</Text>
         </TouchableOpacity>
@@ -130,7 +130,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-evenly',
     elevation: 4,
     shadowColor: '#000',
-    shadowOffset: {width: 0, height: 2},
+    shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.12,
     shadowRadius: 6,
   },
@@ -180,7 +180,7 @@ const styles = StyleSheet.create({
     borderRightColor: 'transparent',
     borderBottomColor: COLORS.accent,
     marginTop: -2,
-    transform: [{rotate: '180deg'}],
+    transform: [{ rotate: '180deg' }],
   },
   title: {
     fontSize: 22,
@@ -254,7 +254,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     elevation: 4,
     shadowColor: COLORS.primary,
-    shadowOffset: {width: 0, height: 4},
+    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.35,
     shadowRadius: 8,
     gap: 10,
